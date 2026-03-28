@@ -126,6 +126,61 @@ pub async fn handle_api_status(
     Json(body).into_response()
 }
 
+/// GET /api/channels — detailed list of communication channels
+pub async fn handle_api_channels(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    let config = state.config.lock().clone();
+    let mut channel_details = Vec::new();
+
+    let session_metadata = state
+        .session_backend
+        .as_ref()
+        .map(|b| b.list_sessions_with_metadata())
+        .unwrap_or_default();
+
+    for (channel, enabled) in config.channels_config.channels() {
+        let name = channel.name().to_string();
+        let channel_type = name.clone(); // In this context, name and type are often similar
+
+        // Aggregate stats from sessions belonging to this channel
+        // Session keys usually follow "channel_id" or "channel_id:recipient" format
+        let mut message_count = 0;
+        let mut last_message_at: Option<chrono::DateTime<chrono::Utc>> = None;
+
+        for meta in &session_metadata {
+            // Check if the session belongs to this channel
+            if meta.key == name || meta.key.starts_with(&format!("{name}:")) {
+                message_count += meta.message_count;
+                if let Some(last) = last_message_at {
+                    if meta.last_activity > last {
+                        last_message_at = Some(meta.last_activity);
+                    }
+                } else {
+                    last_message_at = Some(meta.last_activity);
+                }
+            }
+        }
+
+        channel_details.push(serde_json::json!({
+            "name": name,
+            "type": channel_type,
+            "enabled": enabled,
+            "status": if enabled { "active" } else { "inactive" },
+            "message_count": message_count,
+            "last_message_at": last_message_at.map(|dt| dt.to_rfc3339()),
+            "health": "healthy", // Backend could perform actual health probes here
+        }));
+    }
+
+    Json(serde_json::json!({ "channels": channel_details })).into_response()
+}
+
 /// GET /api/config — current config (api_key masked)
 pub async fn handle_api_config_get(
     State(state): State<AppState>,
